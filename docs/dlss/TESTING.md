@@ -1,23 +1,23 @@
 # DLSS validation plan
 
-Status on 2026-10-16: Phase 0 source audit only. Baseline configuration failed because CMake is unavailable. DLSS is absent. All runtime, validation-layer, timing, image-quality, and hardware results below are **NOT RUN**. This is a repeatable plan, not a test report claiming success.
+Status on 2026-10-16, Phase 0R: source audit re-verified; baseline configuration still blocked because CMake is not visible. DLSS/CUDA enhancements are absent. Hardware enumeration found an RTX 3050 8192 MiB, driver 617.14, compute capability 8.6; Vulkan loader instance version is 1.4.341. Khronos validation is not listed. All emulator runtime, validation-layer, timing, image-quality, and VRAM-delta tests below are **NOT RUN**. See [PHASE_0R.md](PHASE_0R.md) for actual commands/results.
 
 ## Establish the build baseline
 
-1. Confirm the intended checkout/branch and save `git rev-parse HEAD` and `git status --short`. The audited baseline is `86ba056b6c` on `backup/extended-memory-2026-10-13`.
+1. Confirm the intended checkout/branch and save `git rev-parse HEAD` and `git status --short`. Phase 0R started at documentation commit `d6a61eb2ee` on `backup/extended-memory-2026-10-13`; implementation remains at `86ba056b6c`. Run `git submodule update --init --recursive`; in this checkout it succeeds with no submodules to initialize.
 2. Follow `docs/Deps.md` and `docs/Build.md`. Make CMake 3.31+, Ninja, the MSVC x64 toolchain or clang-cl environment, Python, and required dependencies available. Use `tools/windows/load-msvc-env.ps1` in the build shell after Visual Studio is installed. Record compiler, CMake, dependency versions, GPU, driver, Windows version, power mode, and display refresh rate.
 3. Run from the repository root and retain full configure/build logs:
 
 ```powershell
-cmake -S . -B build/dlss-audit-baseline -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build/dlss-audit-baseline --parallel 4
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DYUZU_TESTS=OFF -DYUZU_ENABLE_DLSS=OFF -DYUZU_ENABLE_CUDA_ENHANCEMENTS=OFF
+cmake --build build
 ```
 
-Only run the build after configuration succeeds. The configure command above was attempted in Phase 0 and failed at command lookup; the build command has not run. Use a suitable installed Qt/dependency configuration if defaults cannot resolve it, and record every extra option. Diagnose actual source errors rather than disabling accuracy or existing filters to obtain a build.
+Only run the build after configuration succeeds. These use the Windows command-line guide's configure flags plus the two explicitly requested OFF variables. The Phase 0R attempt failed at command lookup in 0.266 seconds; compilation never ran, so build duration is unavailable. Both new variables are currently undeclared and would not test real feature gating even if configuration succeeded. Use a suitable installed Qt/dependency configuration if defaults cannot resolve it, and record every extra option. Report the first actual build error before changing source to bypass it.
 
 ## ON/OFF matrix once the option exists
 
-Use separate clean build trees with the same compiler/dependency configuration and `-DYUZU_ENABLE_DLSS=OFF` / `-DYUZU_ENABLE_DLSS=ON`. These are future options, not working commands in the audited baseline. Determine the SDK discovery parameter from the actual implementation before configuring ON. Do not commit SDK libraries or DLLs.
+Use separate clean build trees with the same compiler/dependency configuration for (DLSS, CUDA) = (OFF, OFF), (ON, OFF), (ON, ON), and (OFF, ON) for the standalone interop self-test. Both options must default OFF. These are future options, not implemented gates in the audited baseline. Determine SDK discovery parameters from the actual implementation before configuring ON. Do not commit SDK libraries, DLLs, or CUDA toolkit files. Query `nvidia-smi --query-gpu=compute_cap --format=csv,noheader` on each target and verify supported compiler targets instead of hardcoding an architecture.
 
 Cover Windows MSVC and clang-cl; compile Linux with OFF. Confirm OFF has no SDK discovery requirement, link dependency, runtime load, extension additions, or new frame resources. On an ON build, test runtime disabled, supported RTX with runtime available, missing runtime, unsupported GPU, insufficient driver, invalid dimensions, and initialization/evaluation failure. Every failure must log a reason and preserve a working fallback.
 
@@ -55,9 +55,21 @@ Once implemented, bracket every added conversion/copy, depth pass, optical-flow 
 
 Report per-pass and total added GPU time (median, p95, p99), frame-time variance, dropped/presented frames, CPU submission timing, and queue occupancy. Test FIFO, mailbox, immediate, and relaxed FIFO where available, with asynchronous presentation on/off and speed-limit/turbo combinations. Super Resolution must not introduce generated frames or increase the existing frame pool. Timestamps measure GPU duration, not end-to-end input latency; use input-to-display measurement for that claim.
 
-Acceptance target: approximately 3 ms maximum target budget for evaluation plus added passes on the 8 GB desktop in the requested 1080p-to-4K workload. Also test the SDK-recommended Quality dimensions and identify the two workloads separately if they differ. The desktop GPU model is still unspecified; VRAM size alone does not establish compute performance.
+Acceptance target: approximately 3 ms maximum target budget for evaluation plus added passes on the 8 GB desktop in the requested 1080p-to-4K workload. Also test the SDK-recommended Quality dimensions and identify the two workloads separately if they differ. The detected local 8 GB GPU is an NVIDIA GeForce RTX 3050; the separate 4 GB/30 W laptop was not queried. VRAM size alone does not establish compute performance.
 
 Log allocation bytes/count for every new history, color/depth/MV image and scratch allocation, plus SDK-reported internal usage if available. Record unknown internal costs separately, baseline/peak dedicated-memory use, and sustained paging/stutter on the 4 GB laptop. Use the arithmetic estimates in ARCHITECTURE.md only for planning. Test Balanced/Performance and output-resource reuse as low-VRAM candidates after SDK verification.
+
+## CUDA interop and compute comparison gates
+
+Before Phase 2, locate real CUDA, Vulkan, and Optical Flow headers/docs. Establish adapter identity using verified LUID/UUID APIs; do not infer a match from GPU ordinal or name. Verify external image/buffer handle support and ownership plus binary/timeline semaphore capabilities for the actual driver/API combination. Document the implemented sync model in INTEROP.md when it exists; no interop is implemented now.
+
+Self-test both directions: CUDA writes a shared gradient sampled by Vulkan, and Vulkan writes a pattern read by CUDA. Compare readback against expected values and stress resource reuse/recreation. Readback is for the isolated correctness test, not the steady-state frame loop. Validate GPU-side semaphore ordering without device/queue idle calls or CUDA device synchronization. Stop for review if measured handoff overhead exceeds approximately 0.5 ms or introduces CPU stalls.
+
+For MV upsampling/conversion, luminance/MV reduction, and any necessary depth transform, benchmark a matching Vulkan compute shader against each CUDA kernel. Use identical data, format/precision, warmup, dimensions, and repeated runs. Measure CUDA execution with verified event APIs, Vulkan execution with timestamps, and whole-frame impact separately; do not subtract unrelated CUDA/Vulkan clock domains. Include handoff costs and SDK work rather than comparing kernel time alone. Read timing results after completion without blocking the current frame.
+
+Report median/p95/p99, correctness tolerance, bytes allocated/shared, and end-to-end delta. Retain CUDA only if it wins or enables a verified capability unavailable through the Vulkan route. If it loses, recommend its removal. Current results for every kernel and interop case: NOT RUN; no kernels exist. Extend the VRAM ledger to CUDA staging and SDK allocations, avoiding double-counting imported shared payloads.
+
+Restart phase numbering: 1 NGX synthetic inputs; 2 CUDA interop; 3 scene classification; 4 jitter; 5 motion/depth/reset and compute comparisons; 6 pacing; 7 UX. Each phase stops with a report before advancing.
 
 ## Regression checklist and phase report
 

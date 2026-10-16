@@ -1,6 +1,8 @@
-# DLSS integration: Phase 0 architecture audit
+# DLSS integration: Phase 0 / 0R architecture audit
 
 Audit date: 2026-10-16. Source baseline: `86ba056b6c969307b0a8ab0ef04144ad2c574cee`, branch `backup/extended-memory-2026-10-13`. Local checkout: `C:\Users\Nirav\Documents\GitHub\eden-fork`. Git status was clean before this documentation change. Findings apply to this checkout, not an uninspected CUDA branch or another machine.
+
+Phase 0R re-verification starts at `d6a61eb2ee`, which changed documentation only. The owner has now confirmed a restart from this checkout; locating missing previous feature work is no longer a prerequisite. The requested history, stash, source, toolchain, and hardware checks are recorded in [PHASE_0R.md](PHASE_0R.md). No feature implementation was recovered or added.
 
 **Status: source audit documented; baseline build blocked by the local toolchain. No DLSS feature code added.** The repository AGENTS.md prohibits AI work; the owner's explicit request authorizes this fork audit and documentation work. No upstream submission is part of this task.
 
@@ -36,6 +38,8 @@ Paths below are relative to the repository root. Function names are searchable a
 
 The project also contains Lossless Scaling frame-generation code behind `HAS_LSFG`; its CMake option is Android-dependent. It is not NVIDIA DLSS or NVIDIA Optical Flow SDK integration.
 
+The filter inventory also includes the window-adapt choices in `BlitScreen::SetWindowAdaptPass`: nearest neighbor, bilinear, bicubic, zero-tangent, B-spline, Mitchell, Spline1, Gaussian, Lanczos, ScaleForce, Area, and MMPX, plus SGSR Edge. FSR/SGSR use bilinear window adaptation after their layer pass. These paths must remain available; the earlier table emphasized only the separate post-processing passes.
+
 ## Resolution scaling
 
 `Settings::UpdateRescalingInfo` derives `resolution_info` from `resolution_setup`. Texture-cache target selection uses rescalability, image history/ratings, and related attachments to decide whether to use scaled images. Surface dimensions use `(dimension * up_scale) >> down_shift`; viewport/scissor state is dirtied when scaling changes. Vulkan `Image::ScaleUp`/`ScaleDown` manages scaled backing resources, and `AccelerateDisplay` exposes the resulting dimensions.
@@ -49,6 +53,8 @@ Internal resolution scaling and the presentation filter are distinct. FSR/SGSR p
 `PresentManager` owns a bounded frame pool, render-ready semaphores, and present-done fences. `GetRenderFrame` waits for a free frame and its fence. Asynchronous presentation uses a worker queue/thread; synchronous presentation waits for scheduler recording and copies directly. Without LSFG, the pool is bounded by the swapchain image count and the manager's maximum. The existing separate copy submission waits on acquisition and render readiness before signaling the semaphore used for present.
 
 `ChooseSwapPresentMode` in `vk_swapchain.cpp` supports FIFO, relaxed FIFO, mailbox, and immediate, with availability fallback. Speed-limit/turbo state affects selection; the frame-generation setting also affects it. Preserve this logic and the frame pool for DLSS Super Resolution. Do not claim zero added latency from source inspection: queue occupancy, GPU time, and frame-time variance need measurement.
+
+Existing waits are not limited to shutdown: `BlitScreen::DrawToFrame` calls `WaitIdle` when presentation resources need updating (including filter/count/format/size changes). That helper waits for presentation, finishes scheduler work, and waits for the device. These are existing recreation paths, not a design to copy into steady-state DLSS/CUDA processing. The audit does not claim the current renderer is globally wait-free.
 
 The present copy currently describes the intermediate frame's producer as a color-attachment write. Writing DLSS output directly into that frame would require reviewing that dependency for the actual producer, as well as format, storage usage, and layout. Avoid an extra full-resolution staging image if supported, but reuse is not yet proven valid. SDK evaluation should be scheduled before the existing render-ready flush, outside a render pass, with explicit lifetime and state handling. No Vulkan API or NGX signature is introduced by this audit.
 
@@ -72,21 +78,32 @@ Result: PowerShell `CommandNotFoundException`: `cmake` is not recognized. Config
 
 `Get-Command cmake,ninja,cl,clang-cl,git -ErrorAction SilentlyContinue` found only Git. Standard CMake, Visual Studio installer/vswhere, Visual Studio, Qt, and Vulkan SDK locations checked were absent. A nonstandard installation may exist. The repository requires CMake 3.31+ and supplies `tools/windows/load-msvc-env.ps1`, which itself depends on vswhere. No existing build directory was present in the root inventory.
 
-No source build defect has been demonstrated and no baseline source fix is justified yet. A usable CMake/compiler/dependency environment is required to configure, compile, and diagnose real failures. `YUZU_ENABLE_DLSS` does not exist here; setting an unused CMake variable ON/OFF would not verify either integration configuration. Linux compilation is also unverified. See [TESTING.md](TESTING.md) for continuation steps.
+No source build defect has been demonstrated and no baseline source fix is justified yet. A usable CMake/compiler/dependency environment is required to configure, compile, and diagnose real failures. Neither `YUZU_ENABLE_DLSS` nor `YUZU_ENABLE_CUDA_ENHANCEMENTS` exists here; setting unused CMake variables ON/OFF would not verify integration configurations. Linux compilation is also unverified. Phase 0R retried configuration with the documented Windows flags and both requested OFF values; command lookup again failed. See [PHASE_0R.md](PHASE_0R.md) for timing/tool results and [TESTING.md](TESTING.md) for continuation steps.
+
+## Restart scope: CUDA support only
+
+DLSS does not require CUDA. Proposed CUDA work is limited to optical-flow grid conversion/upsampling, luminance/MV reductions for history reset, necessary depth processing, and external-memory/semaphore interop supporting those operations. None exists in this checkout. Do not linearize or invert depth just because a CUDA path exists: first verify the selected NGX depth contract and guest depth convention. Optical Flow SDK Vulkan support and GPU-specific OF capability remain unverified until its actual headers/docs and capability checks are available; CUDA compute capability alone is not evidence of OF support.
+
+The two proposed build options default OFF. CUDA-only operation is permitted for the isolated interop self-test; normal DLSS must work without CUDA. SDK/toolkit files must stay outside Git. Match CUDA and Vulkan adapters by verified LUID/UUID handling, never by ordinal zero. The local `nvidia-smi` query reports compute capability 8.6; record that as the candidate local target, with no architecture setting committed before toolchain verification.
+
+NGX and Vulkan passes should stay in the renderer's scheduled Vulkan submission flow. CUDA kernels require a separate CUDA stream with external semaphore dependencies joining the frame's GPU work; they cannot be literally recorded as Vulkan commands. The implementation must avoid dependency cycles and new queued frames, and include all handoff overhead in measurements. Do not add per-frame device/queue idle calls or CUDA device synchronization. Exact external handle types, ownership, semaphore support, and signatures are still unverified.
+
+Every proposed CUDA kernel requires an equivalent Vulkan compute implementation with matching inputs, outputs, precision, and workload. Compare both isolated kernel cost and total frame cost including handoffs. Keep CUDA only for a measured advantage or a demonstrated unavailable Vulkan capability. Phase 2 must stop for review if interop overhead exceeds approximately 0.5 ms or requires CPU stalls. No benchmark result or speedup is available.
 
 ## Gap analysis and ordered risks
 
 | Priority | Gap / risk | Existing foundation | Required next evidence or work |
 | --- | --- | --- | --- |
-| P0 | Checkout differs from described CUDA/DLSS fork | Audited branch and commit are identified | Locate intended changes or explicitly continue from this baseline |
 | P0 | No working build toolchain in this session | Build/dependency guides and MSVC environment script | Successful baseline configuration/build before feature changes |
 | P0 | NGX SDK/API contract absent | Vulkan extension/device setup and dynamic-library infrastructure | Inspect actual SDK headers/docs; verify loading, extension query ordering, capability checks, licensing exclusions, graceful fallback |
+| P0 | Validation environment incomplete | Vulkan enumeration succeeds on the local RTX 3050 8 GB | Make Khronos validation/sync validation available; investigate stale Epic overlay manifest separately |
+| P1 | CUDA/OF capability and interop contract unverified | Compute capability 8.6 detected, no toolkit headers found | Inspect SDKs, match adapters, validate bidirectional sharing, and benchmark the 0.5 ms interop gate |
 | P1 | No temporal inputs or scene identity | Color/depth attachment cache and scheduler; GPU draw/pass logging hooks | Synthetic-input validation first; then per-frame attachment/draw-order instrumentation |
 | P1 | Scene/UI split is not generally reconstructible from final color | Guest render targets and final layer composition | Track target dependencies; assess post-FX, multiple scene passes, resolves, and reused depth; retain final-frame fallback |
 | P1 | Unsafe temporal resource/state reuse could regress rendering | Tick/fence lifetime management and existing barriers | Validate formats/usages/layouts and producer-consumer dependencies, including present-copy producer changes |
 | P1 | Motion vectors and jitter may be incorrect | Shader IR, position pass, pipeline keys | Verified SDK units/signs, stage coverage, variant keys, scene-only application; capability-check Optical Flow separately |
 | P1 | Draw identity/reprojection is game-dependent | Guest shaders and constant buffers | Demonstrate stable identities and previous transforms per game; do not assume a universal matrix layout |
-| P2 | VRAM and time budget unmeasured | Existing allocator and bounded present frames | Allocation ledger, SDK memory accounting where supported, timestamp measurements, low-VRAM modes |
+| P2 | VRAM and time budget unmeasured | Existing allocator and bounded present frames | Allocation ledger, SDK memory accounting where supported, Vulkan timestamps/CUDA events and equivalent-kernel comparisons, low-VRAM modes |
 | P2 | Lifecycle/settings/regression coverage missing | Existing settings and renderer lifecycle | Reset/recreate policy, title-ID overrides, missing-runtime tests, non-NVIDIA/Linux coverage |
 
 Scene classification is a general heuristic, not a guarantee. A title-ID override that names a target/pass or interprets particular constant buffers is a game-specific workaround. Running later guest UI draws at output resolution may conflict with guest framebuffer dimensions, coordinates, shader assumptions, and later sampling; do not promise it without captures. Existing `ir_opt/position_pass.cpp` handles a particular vertex-position conversion, not a general DLSS jitter solution; geometry/tessellation and existing guest jitter need investigation too.
@@ -104,9 +121,10 @@ This documentation change adds zero runtime resources. Future resource estimates
 | Output, RGBA8 candidate | 3840 x 2160 x 4 | 31.64 |
 | Output, RGBA16F alternative | 3840 x 2160 x 8 | 63.28 |
 | OF grid/intermediates, NGX history/scratch | SDK-dependent | Unknown |
+| CUDA staging/import-associated allocations | Interop design-dependent; shared payload must not be counted twice | Unknown |
 
 Log actual committed bytes, resource count/lifetime, render/output dimensions, peak delta, and any unobservable SDK cost explicitly as unknown. Do not present the table as total DLSS overhead. Prefer reusing compatible present output and lower render dimensions, avoiding additional full-resolution history/copies; the SDK and optical-flow resource requirements must decide the actual design. Guest 12 GiB memory support is unrelated to dedicated GPU VRAM capacity.
 
 ## Phase boundary
 
-Phase 0 documentation is available for review, but the baseline-build gate is not satisfied. No runtime validation, screenshots, GPU timing, VRAM measurement, or significant performance gain is claimed. Resolve checkout/toolchain/SDK inputs, produce the baseline build report, and only then begin Phase 1.
+Phase 0R documentation is available for review, but the baseline-build gate is not satisfied. The restart checkout is confirmed. Resolve the toolchain visibility and SDK inputs, produce a successful baseline build report, and only then begin Phase 1. Hardware enumeration has run; emulator validation, screenshots, GPU timing, VRAM delta, and performance gains remain unverified.
